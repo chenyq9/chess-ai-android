@@ -1,11 +1,16 @@
 package com.chenyq9.chessai;
 
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -24,9 +29,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
-    // 在这里填入你的 DeepSeek API Key
-    private static final String API_KEY = "sk-你的DeepSeek密钥";
     private static final String API_URL = "https://api.deepseek.com/chat/completions";
+    private static final String PREFS_NAME = "chess_ai_prefs";
+    private static final String KEY_API = "deepseek_api_key";
 
     private ChessBoardView boardView;
     private TextView tvStatus;
@@ -50,6 +55,7 @@ public class MainActivity extends AppCompatActivity {
         Button btnRestart = findViewById(R.id.btn_restart);
         Button btnUndo = findViewById(R.id.btn_undo);
         Button btnSend = findViewById(R.id.btn_send);
+        Button btnSettings = findViewById(R.id.btn_settings);
 
         boardView.setOnMoveListener((fr, fc, tr, tc, moved) -> {
             if (moved) {
@@ -89,7 +95,54 @@ public class MainActivity extends AppCompatActivity {
             return true;
         });
 
+        btnSettings.setOnClickListener(v -> showSettingsDialog());
+
         updateStatus();
+
+        // 首次启动自动弹出设置框
+        if (getApiKey().isEmpty()) {
+            showSettingsDialog();
+        }
+    }
+
+    private String getApiKey() {
+        SharedPreferences sp = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        return sp.getString(KEY_API, "").trim();
+    }
+
+    private void saveApiKey(String key) {
+        SharedPreferences sp = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        sp.edit().putString(KEY_API, key.trim()).apply();
+    }
+
+    private void showSettingsDialog() {
+        final EditText etKey = new EditText(this);
+        etKey.setHint("sk-...");
+        etKey.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        etKey.setText(getApiKey());
+        etKey.setSelection(etKey.getText().length());
+
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(48, 24, 48, 24);
+        container.addView(etKey);
+
+        new AlertDialog.Builder(this)
+                .setTitle("设置 DeepSeek API Key")
+                .setMessage("填入后 AI 下棋和对话才能工作。\nKey 只保存在本机。")
+                .setView(container)
+                .setPositiveButton("保存", (d, w) -> {
+                    String key = etKey.getText().toString().trim();
+                    if (key.isEmpty()) {
+                        Toast.makeText(this, "Key 不能为空", Toast.LENGTH_SHORT).show();
+                    } else {
+                        saveApiKey(key);
+                        Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .setCancelable(false)
+                .show();
     }
 
     private void updateStatus() {
@@ -109,6 +162,13 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        String apiKey = getApiKey();
+        if (apiKey.isEmpty()) {
+            // 没有 Key，回退本地算法
+            fallbackLocalMove(e);
+            return;
+        }
+
         String boardText = buildBoardText(e);
         String sys = "你是中国象棋高手。棋盘是10行9列，行0在顶部（黑方底线），行9在底部（红方底线），列0在最左。"
                 + "当前轮到黑方走棋。请分析局面，返回黑方最佳走法。"
@@ -117,13 +177,12 @@ public class MainActivity extends AppCompatActivity {
         String user = "当前棋盘（用 . 表示空位）：\n" + boardText
                 + "\n请给出黑方最佳走法（fr,fc,tr,tc）：";
 
-        String reply = callDeepSeek(sys, user);
+        String reply = callDeepSeek(apiKey, sys, user);
         int[] mv = parseMove(reply);
         boolean moved = false;
         if (mv != null) {
             final int fr = mv[0], fc = mv[1], tr = mv[2], tc = mv[3];
             if (e.legalMove(fr, fc, tr, tc, false)) {
-                final boolean[] ok = {false};
                 handler.post(() -> {
                     e.move(fr, fc, tr, tc);
                     boardView.invalidate();
@@ -134,16 +193,19 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (!moved) {
-            // 大模型返回非法，回退到本地算法
-            ChessEngine.Move local = e.bestMove(false);
-            if (local != null) {
-                final int fr = local.fr, fc = local.fc, tr = local.tr, tc = local.tc;
-                handler.post(() -> {
-                    e.move(fr, fc, tr, tc);
-                    boardView.invalidate();
-                    updateStatus();
-                });
-            }
+            fallbackLocalMove(e);
+        }
+    }
+
+    private void fallbackLocalMove(ChessEngine e) {
+        ChessEngine.Move local = e.bestMove(false);
+        if (local != null) {
+            final int fr = local.fr, fc = local.fc, tr = local.tr, tc = local.tc;
+            handler.post(() -> {
+                e.move(fr, fc, tr, tc);
+                boardView.invalidate();
+                updateStatus();
+            });
         }
     }
 
@@ -190,13 +252,13 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    private String callDeepSeek(String systemPrompt, String userMsg) {
+    private String callDeepSeek(String apiKey, String systemPrompt, String userMsg) {
         try {
             URL url = new URL(API_URL);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
-            conn.setRequestProperty("Authorization", "Bearer " + API_KEY);
+            conn.setRequestProperty("Authorization", "Bearer " + apiKey);
             conn.setDoOutput(true);
             conn.setConnectTimeout(15000);
             conn.setReadTimeout(30000);
@@ -249,7 +311,12 @@ public class MainActivity extends AppCompatActivity {
         etInput.setText("");
         appendChat("你: " + text + "\n");
         executor.execute(() -> {
-            String reply = callDeepSeek(
+            String apiKey = getApiKey();
+            if (apiKey.isEmpty()) {
+                appendChat("AI: 请先点「设置」填入 DeepSeek API Key\n\n");
+                return;
+            }
+            String reply = callDeepSeek(apiKey,
                     "你是一个中国象棋助手，可以和用户聊天，也可以讨论棋局。回答简洁友好。",
                     text
             );
