@@ -29,9 +29,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String API_URL = "https://api.deepseek.com/chat/completions";
     private static final String PREFS_NAME = "chess_ai_prefs";
     private static final String KEY_API = "deepseek_api_key";
+    private static final String KEY_URL = "deepseek_api_url";
+    private static final String KEY_MODEL = "deepseek_model";
 
     private ChessBoardView boardView;
     private TextView tvStatus;
@@ -99,7 +100,6 @@ public class MainActivity extends AppCompatActivity {
 
         updateStatus();
 
-        // 首次启动自动弹出设置框
         if (getApiKey().isEmpty()) {
             showSettingsDialog();
         }
@@ -110,9 +110,18 @@ public class MainActivity extends AppCompatActivity {
         return sp.getString(KEY_API, "").trim();
     }
 
-    private void saveApiKey(String key) {
+    private String getApiUrl() {
         SharedPreferences sp = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        sp.edit().putString(KEY_API, key.trim()).apply();
+        String url = sp.getString(KEY_URL, "https://api.deepseek.com/chat/completions").trim();
+        if (url.isEmpty()) url = "https://api.deepseek.com/chat/completions";
+        return url;
+    }
+
+    private String getModel() {
+        SharedPreferences sp = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String model = sp.getString(KEY_MODEL, "deepseek-chat").trim();
+        if (model.isEmpty()) model = "deepseek-chat";
+        return model;
     }
 
     private void showSettingsDialog() {
@@ -122,21 +131,52 @@ public class MainActivity extends AppCompatActivity {
         etKey.setText(getApiKey());
         etKey.setSelection(etKey.getText().length());
 
+        final EditText etUrl = new EditText(this);
+        etUrl.setHint("https://api.deepseek.com/chat/completions");
+        etUrl.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        etUrl.setText(getApiUrl());
+
+        final EditText etModel = new EditText(this);
+        etModel.setHint("deepseek-chat");
+        etModel.setInputType(InputType.TYPE_CLASS_TEXT);
+        etModel.setText(getModel());
+
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
         container.setPadding(48, 24, 48, 24);
+
+        TextView tvKey = new TextView(this);
+        tvKey.setText("API Key");
+        container.addView(tvKey);
         container.addView(etKey);
 
+        TextView tvUrl = new TextView(this);
+        tvUrl.setText("API URL（OpenAI 兼容）");
+        tvUrl.setPadding(0, 24, 0, 0);
+        container.addView(tvUrl);
+        container.addView(etUrl);
+
+        TextView tvModel = new TextView(this);
+        tvModel.setText("模型名");
+        tvModel.setPadding(0, 24, 0, 0);
+        container.addView(tvModel);
+        container.addView(etModel);
+
         new AlertDialog.Builder(this)
-                .setTitle("设置 DeepSeek API Key")
-                .setMessage("填入后 AI 下棋和对话才能工作。\nKey 只保存在本机。")
+                .setTitle("设置 AI")
+                .setMessage("没有 Key 时 AI 不会走棋，对话也不能用。")
                 .setView(container)
                 .setPositiveButton("保存", (d, w) -> {
                     String key = etKey.getText().toString().trim();
+                    String url = etUrl.getText().toString().trim();
+                    String model = etModel.getText().toString().trim();
                     if (key.isEmpty()) {
                         Toast.makeText(this, "Key 不能为空", Toast.LENGTH_SHORT).show();
                     } else {
-                        saveApiKey(key);
+                        SharedPreferences sp = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                        sp.edit().putString(KEY_API, key).apply();
+                        sp.edit().putString(KEY_URL, url).apply();
+                        sp.edit().putString(KEY_MODEL, model).apply();
                         Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
                     }
                 })
@@ -164,8 +204,11 @@ public class MainActivity extends AppCompatActivity {
 
         String apiKey = getApiKey();
         if (apiKey.isEmpty()) {
-            // 没有 Key，回退本地算法
-            fallbackLocalMove(e);
+            handler.post(() -> {
+                tvStatus.setText("红方走棋");
+                Toast.makeText(this, "请先点「设置」填入 API Key", Toast.LENGTH_LONG).show();
+                boardView.invalidate();
+            });
             return;
         }
 
@@ -177,36 +220,32 @@ public class MainActivity extends AppCompatActivity {
         String user = "当前棋盘（用 . 表示空位）：\n" + boardText
                 + "\n请给出黑方最佳走法（fr,fc,tr,tc）：";
 
-        String reply = callDeepSeek(apiKey, sys, user);
+        String reply = callLLM(apiKey, getApiUrl(), getModel(), sys, user);
         int[] mv = parseMove(reply);
-        boolean moved = false;
-        if (mv != null) {
-            final int fr = mv[0], fc = mv[1], tr = mv[2], tc = mv[3];
-            if (e.legalMove(fr, fc, tr, tc, false)) {
-                handler.post(() -> {
-                    e.move(fr, fc, tr, tc);
-                    boardView.invalidate();
-                    updateStatus();
-                });
-                moved = true;
-            }
-        }
-
-        if (!moved) {
-            fallbackLocalMove(e);
-        }
-    }
-
-    private void fallbackLocalMove(ChessEngine e) {
-        ChessEngine.Move local = e.bestMove(false);
-        if (local != null) {
-            final int fr = local.fr, fc = local.fc, tr = local.tr, tc = local.tc;
+        if (mv == null) {
             handler.post(() -> {
-                e.move(fr, fc, tr, tc);
+                tvStatus.setText("红方走棋");
+                Toast.makeText(this, "AI 没有返回有效走法", Toast.LENGTH_LONG).show();
                 boardView.invalidate();
-                updateStatus();
             });
+            return;
         }
+
+        final int fr = mv[0], fc = mv[1], tr = mv[2], tc = mv[3];
+        if (!e.legalMove(fr, fc, tr, tc, false)) {
+            handler.post(() -> {
+                tvStatus.setText("红方走棋");
+                Toast.makeText(this, "AI 返回了非法走法", Toast.LENGTH_LONG).show();
+                boardView.invalidate();
+            });
+            return;
+        }
+
+        handler.post(() -> {
+            e.move(fr, fc, tr, tc);
+            boardView.invalidate();
+            updateStatus();
+        });
     }
 
     private String buildBoardText(ChessEngine e) {
@@ -252,9 +291,9 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    private String callDeepSeek(String apiKey, String systemPrompt, String userMsg) {
+    private String callLLM(String apiKey, String apiUrl, String model, String systemPrompt, String userMsg) {
         try {
-            URL url = new URL(API_URL);
+            URL url = new URL(apiUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
@@ -264,7 +303,7 @@ public class MainActivity extends AppCompatActivity {
             conn.setReadTimeout(30000);
 
             JSONObject body = new JSONObject();
-            body.put("model", "deepseek-chat");
+            body.put("model", model);
             JSONArray messages = new JSONArray();
             JSONObject sys = new JSONObject();
             sys.put("role", "system");
@@ -313,14 +352,14 @@ public class MainActivity extends AppCompatActivity {
         executor.execute(() -> {
             String apiKey = getApiKey();
             if (apiKey.isEmpty()) {
-                appendChat("AI: 请先点「设置」填入 DeepSeek API Key\n\n");
+                appendChat("AI: 请先点「设置」填入 API Key\n\n");
                 return;
             }
-            String reply = callDeepSeek(apiKey,
+            String reply = callLLM(apiKey, getApiUrl(), getModel(),
                     "你是一个中国象棋助手，可以和用户聊天，也可以讨论棋局。回答简洁友好。",
                     text
             );
-            if (reply == null) reply = "AI调用失败，请检查网络或API Key";
+            if (reply == null) reply = "AI调用失败，请检查网络、API Key、URL 或模型名";
             appendChat("AI: " + reply.trim() + "\n\n");
         });
     }
